@@ -13,6 +13,11 @@ import (
 	"github.com/paulmach/go.geojson"
 )
 
+type coverResult struct {
+	Length int
+	Size float64
+}
+
 var regionCoverers = []s2.RegionCoverer{
 	s2.RegionCoverer{MinLevel: 1, MaxLevel: 9, MaxCells: 6000000},	// geohash 4
 	s2.RegionCoverer{MinLevel: 1, MaxLevel: 12, MaxCells: 6000000}, // geohash 5
@@ -21,6 +26,7 @@ var regionCoverers = []s2.RegionCoverer{
 }
 
 var s2Polygons map[interface{}](*s2.Polygon)
+var polygonConversionDuration float64
 
 var statFile *os.File
 
@@ -35,12 +41,12 @@ func statFileInit() {
 	statFile, err = os.OpenFile("./out/stats.csv", os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0644)
 	checkError(err)
 
-	_, err = statFile.Write([]byte("LEVEL,TIME_SEC\n"))
+	_, err = statFile.Write([]byte("LEVEL,TIME_SEC,LENGTH,FILE_SIZE_KB\n"))
 	checkError(err)
 }
 
-func statFileWrite(level int, time float64) {
-	_, err := statFile.Write([]byte(fmt.Sprintf("%v,%v\n", level, time)))
+func statFileWrite(level int, time float64, length int, size float64) {
+	_, err := statFile.Write([]byte(fmt.Sprintf("%v,%v,%v,%v\n", level, polygonConversionDuration + time, length, size)))
 	checkError(err)
 }
 
@@ -81,14 +87,15 @@ func cover(
 	featureProperties map[string]interface{},
 	regionCoverer s2.RegionCoverer,
 	waitGroup *sync.WaitGroup,
+	resultChannel chan *coverResult,
 ) {
+	result := coverResult{}
+
 	_ = os.Mkdir(fmt.Sprintf("./out/%v", regionCoverer.MaxLevel), 0644)
 
-	file, err := os.OpenFile(
-		fmt.Sprintf("./out/%v/%v.s2cells", regionCoverer.MaxLevel, featureProperties["codigo"]),
-		os.O_CREATE | os.O_WRONLY | os.O_TRUNC,
-		0644,
-	)
+	filePath := fmt.Sprintf("./out/%v/%v.s2cells", regionCoverer.MaxLevel, featureProperties["codigo"])
+
+	file, err := os.OpenFile(filePath, os.O_CREATE | os.O_WRONLY | os.O_TRUNC, 0644)
 	if err != nil {
 		fmt.Println("  Error, cannot open file for ", featureProperties["texto"], " - ", err)
 		waitGroup.Done()
@@ -96,6 +103,7 @@ func cover(
 	}
 	
 	cellUnion := regionCoverer.Covering(s2.Region(polygon))
+	result.Length = len(cellUnion)
 
 	for _, cell := range cellUnion {
 		if _, err := file.Write([]byte(cell.ToToken() + "\n")); err != nil {
@@ -107,19 +115,39 @@ func cover(
 
 	file.Close()
 
+	fileStat, err := os.Stat(filePath)
+	if err != nil {
+		fmt.Println("  Error, cannot read stat file ", filePath)
+		waitGroup.Done()
+		return
+	}
+	result.Size = float64(fileStat.Size()) / 1024.0
+
 	fmt.Printf("  %v - OK\n", featureProperties["texto"])
+	resultChannel <- &result
 	waitGroup.Done()
 }
 
 // cover all features in one level
-func coverLevel(featureCollection *geojson.FeatureCollection, regionCoverer s2.RegionCoverer) {
+func coverLevel(featureCollection *geojson.FeatureCollection, regionCoverer s2.RegionCoverer) (length int, size float64) {
+	resultChannel := make(chan *coverResult, len(featureCollection.Features))
+	length, size = 0, float64(0)
+
 	waitGroup := sync.WaitGroup{}
 	waitGroup.Add(len(featureCollection.Features))
 	for _, feature := range featureCollection.Features {
-		go cover(s2Polygons[feature.Properties["codigo"]], feature.Properties, regionCoverer, &waitGroup)
+		go cover(s2Polygons[feature.Properties["codigo"]], feature.Properties, regionCoverer, &waitGroup, resultChannel)
 	}
 	waitGroup.Wait()
+
+	close(resultChannel)
+	for coverResult := range resultChannel {
+		length += coverResult.Length
+		size += coverResult.Size
+	}
 	fmt.Println("Level Success")
+
+	return length, size
 }
 
 func main() {
@@ -139,14 +167,14 @@ func main() {
 		s2Polygons[feature.Properties["codigo"]], err = geometryToS2Polygon(feature.Geometry)
 		checkError(err)
 	}
-	statFileWrite(0, time.Since(startTime).Seconds())
+	polygonConversionDuration = time.Since(startTime).Seconds()
 
 	// iterate over different regionCoverers and convert all polygons in different levels
 	for _, regionCoverer := range regionCoverers {
 		fmt.Printf("Level %v - %v\n", regionCoverer.MinLevel, regionCoverer.MaxLevel)
 		startTime = time.Now()
-		coverLevel(featureCollection, regionCoverer)
-		statFileWrite(regionCoverer.MaxLevel, time.Since(startTime).Seconds())
+		length, size := coverLevel(featureCollection, regionCoverer)
+		statFileWrite(regionCoverer.MaxLevel, time.Since(startTime).Seconds(), length, size)
 	}
 
 	fmt.Println("Exited")
