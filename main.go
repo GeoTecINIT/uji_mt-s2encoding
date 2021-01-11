@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	// "strconv"
 	"sync"
 	"time"
 
@@ -88,18 +89,36 @@ func cover(
 	regionCoverer s2.RegionCoverer,
 	waitGroup *sync.WaitGroup,
 	resultChannel chan *coverResult,
+	evaluationMode bool,
 ) {
 	result := coverResult{}
 
 	_ = os.Mkdir(fmt.Sprintf("./out/%v", regionCoverer.MaxLevel), 0644)
-
 	filePath := fmt.Sprintf("./out/%v/%v.s2cells", regionCoverer.MaxLevel, featureProperties["codigo"])
-
+	file64Path := fmt.Sprintf("./out/%v/%v.s2cells-base64", regionCoverer.MaxLevel, featureProperties["codigo"])
 	file, err := os.OpenFile(filePath, os.O_CREATE | os.O_WRONLY | os.O_TRUNC, 0644)
 	if err != nil {
 		fmt.Println("  Error, cannot open file for ", featureProperties["texto"], " - ", err)
 		waitGroup.Done()
 		return
+	}
+	file64, err := os.OpenFile(file64Path, os.O_CREATE | os.O_WRONLY | os.O_TRUNC, 0644)
+	if err != nil {
+		fmt.Println("  Error, cannot open file for base64 ", featureProperties["texto"], " - ", err)
+		waitGroup.Done()
+		return
+	}
+
+	var fileBin *os.File;
+	if evaluationMode {
+		_ = os.Mkdir(fmt.Sprintf("./out/binarygo-%v", regionCoverer.MaxLevel), 0644)
+		fileBinPath := fmt.Sprintf("./out/binarygo-%v/%v.s2cells-bin", regionCoverer.MaxLevel, featureProperties["codigo"])
+		fileBin, err = os.OpenFile(fileBinPath, os.O_CREATE | os.O_WRONLY | os.O_TRUNC, 0644)
+		if err != nil {
+			fmt.Println("  Error, cannot open file for binary ", featureProperties["texto"], " - ", err)
+			waitGroup.Done()
+			return
+		}
 	}
 	
 	cellUnion := regionCoverer.Covering(s2.Region(polygon))
@@ -111,9 +130,22 @@ func cover(
 			waitGroup.Done()
 			return
 		}
+		if _, err := file64.Write([]byte(S2CellIDToBase64(cell) + "\n")); err != nil {
+			fmt.Println("  Error, cannot write base64 file for ", featureProperties["texto"], " - ", err)
+			waitGroup.Done()
+			return
+		}
+		if evaluationMode {
+			if _, err := fileBin.Write([]byte(fmt.Sprintf("%064b\n", cell))); err != nil {
+				fmt.Println("  Error, cannot write binary file for ", featureProperties["texto"], " - ", err)
+				waitGroup.Done()
+				return
+			}
+		}
 	}
 
 	file.Close()
+	fileBin.Close()
 
 	fileStat, err := os.Stat(filePath)
 	if err != nil {
@@ -136,7 +168,7 @@ func coverLevel(featureCollection *geojson.FeatureCollection, regionCoverer s2.R
 	waitGroup := sync.WaitGroup{}
 	waitGroup.Add(len(featureCollection.Features))
 	for _, feature := range featureCollection.Features {
-		go cover(s2Polygons[feature.Properties["codigo"]], feature.Properties, regionCoverer, &waitGroup, resultChannel)
+		go cover(s2Polygons[feature.Properties["codigo"]], feature.Properties, regionCoverer, &waitGroup, resultChannel, true)
 	}
 	waitGroup.Wait()
 
