@@ -25,6 +25,7 @@ fs.writeFileSync(statsPath, 'PRECISION,S2B64TREE_KB,S2B64TREE_TIME_SEC\n');
     const startTime = new Date().getTime();
     const tree = makeTree(data);
     const encodedTree = encoder.encode(tree);
+    fs.writeFileSync(filePath + 'tree', Buffer.from(encodedTree));
     sumTimeMillisecs += new Date().getTime() - startTime;
     sumSizeBytes += Buffer.from(encodedTree).byteLength;
     const decodedTree = decoder.decode(encodedTree);
